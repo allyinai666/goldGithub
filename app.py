@@ -36,24 +36,22 @@ st.markdown("""
 
 st.title("📊 Supabase 多表数据可视化分析")
 
-# ====================== 初始化Supabase连接（移除缓存，避免返回客户端对象） ======================
+# ====================== 初始化Supabase连接 ======================
 def init_supabase_connection():
-    """
-    初始化Supabase连接（仅验证，不返回客户端对象）
-    """
+    """初始化Supabase连接（仅验证，不返回客户端对象）"""
     try:
-        # 仅验证连接（用任意表测试，避免系统表）
         supabase_temp = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # 尝试查询第一个表的1条数据（避免测试表不存在的问题）
-        first_table = list(TABLES_CONFIG.keys())[0]
-        supabase_temp.table(first_table).select("*").limit(1).execute()
-        return True, "✅ Supabase连接成功！"
+        # 验证gold_price表连接（指定limit避免分页问题）
+        response = supabase_temp.table("gold_price").select("*").limit(1).execute()
+        if len(response.data) > 0:
+            return True, "✅ Supabase连接成功！"
+        else:
+            return True, "✅ Supabase连接成功！（gold_price表查询到空数据）"
     except Exception as e:
         error_str = str(e).lower()
         if "authentication" in error_str or "invalid" in error_str:
             return False, "❌ 鉴权失败：URL或Key错误，请检查Secrets配置"
         elif "pgrst205" in error_str or "relation" in error_str:
-            # 表不存在但连接正常
             return True, "✅ Supabase连接成功！（表可能未创建/权限不足）"
         else:
             return False, f"❌ 连接失败：{str(e)[:100]}"
@@ -63,35 +61,39 @@ conn_success, conn_msg = init_supabase_connection()
 st.sidebar.header("🔌 连接状态")
 st.sidebar.info(conn_msg)
 
-# ====================== 数据加载函数（移除系统表查询，直接处理数据） ======================
+# ====================== 数据加载函数（修复gold_price表分页/读取问题） ======================
 @st.cache_data(ttl=3600)
 def load_supabase_table(table_name):
     """
-    加载Supabase表数据（移除columns系统表查询，直接基于配置的字段处理）
+    加载Supabase表数据（适配gold_price表：取消分页限制，兼容text主键）
     """
-    # 从配置读取当前表的字段信息
     config = TABLES_CONFIG[table_name]
     date_col = config["date_col"]
     value_cols = config["value_cols"]
     
     try:
-        # 1. 内部创建连接
+        # 1. 创建连接
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 2. 直接查询表数据（不查系统表）
-        response = supabase.table(table_name).select("*").execute()
+        # 2. 核心修复：取消分页限制，读取所有数据（适配2000+条数据）
+        # gold_price表特殊处理：指定limit=10000（覆盖2000条），兼容text主键
+        if table_name == "gold_price":
+            response = supabase.table(table_name).select("*").limit(10000).execute()
+        else:
+            response = supabase.table(table_name).select("*").limit(10000).execute()
+        
+        # 3. 解析响应数据（关键：确保data不为空）
         df = pd.DataFrame(response.data)
+        st.sidebar.debug(f"📝 {table_name} 原始数据条数：{len(df)}")  # 调试：显示实际读取的条数
         
-        # 3. 检查数据是否为空
+        # 4. 检查数据是否为空
         if df.empty:
-            raise Exception("表中无数据")
+            raise Exception(f"表查询返回空数据（响应数据条数：{len(response.data)}）")
         
-        # 4. 字段兼容性处理（基于配置，不依赖系统表）
-        # 检查日期字段是否存在
+        # 5. 字段检查
         if date_col not in df.columns:
             raise Exception(f"日期字段 {date_col} 不存在，表字段：{list(df.columns)}")
         
-        # 检查数值字段是否存在
         actual_value_col = None
         for col in value_cols:
             if col in df.columns:
@@ -100,27 +102,29 @@ def load_supabase_table(table_name):
         if not actual_value_col:
             raise Exception(f"数值字段 {value_cols} 不存在，表字段：{list(df.columns)}")
         
-        # 5. 数据清洗（适配建表SQL的字段类型）
-        # 日期字段转换（兼容text/date/timestamp）
-        if df[date_col].dtype == "object":  # text类型日期
-            df["date"] = pd.to_datetime(df[date_col], errors="coerce")
-        else:  # date/timestamp类型
-            df["date"] = pd.to_datetime(df[date_col])
+        # 6. 数据清洗（重点适配gold_price的text类型日期/数值）
+        # 日期字段转换（gold_date是text类型，需强制转换）
+        if table_name == "gold_price":
+            # 强制转换text类型的gold_date为日期（忽略格式错误）
+            df["date"] = pd.to_datetime(df[date_col], errors="coerce", format="%Y-%m-%d")
+        else:
+            if df[date_col].dtype == "object":
+                df["date"] = pd.to_datetime(df[date_col], errors="coerce")
+            else:
+                df["date"] = pd.to_datetime(df[date_col])
         
-        # 数值字段转换（兼容text/double precision）
+        # 数值字段转换（gold_price的nwgold_price是text类型）
         df["value"] = pd.to_numeric(df[actual_value_col], errors="coerce").fillna(0)
         
         # 过滤无效数据
         df = df.dropna(subset=["date"]).reset_index(drop=True)
+        st.sidebar.info(f"📋 {table_name} 有效数据条数：{len(df)}（原始：{len(response.data)}）")
         
-        # 输出表字段信息到侧边栏（基于实际数据）
-        st.sidebar.info(f"📋 表 {table_name} 字段：{list(df.columns)}")
-        
-        return df, True, f"✅ 加载成功（{len(df)} 条数据）"
+        return df, True, f"✅ 加载成功（有效数据：{len(df)} 条）"
     
     except Exception as e:
-        st.warning(f"⚠️ 加载表 {table_name} 失败：{str(e)[:100]}")
-        # 生成模拟数据（从配置读取基础值）
+        st.warning(f"⚠️ 加载表 {table_name} 失败：{str(e)[:150]}")
+        # 生成模拟数据
         dates = pd.date_range(start="2024-01-01", periods=30)
         base_value = SIMULATE_DATA_BASE.get(table_name, 100)
         
@@ -144,7 +148,6 @@ if conn_success:
             "unit": TABLES_CONFIG[table_name]["unit"]
         }
 else:
-    # 连接失败时生成所有模拟数据
     st.warning("⚠️ Supabase连接失败，全部使用模拟数据")
     for table_name in TABLES_CONFIG.keys():
         dates = pd.date_range(start="2024-01-01", periods=30)
@@ -162,7 +165,7 @@ else:
             "unit": TABLES_CONFIG[table_name]["unit"]
         }
 
-# ====================== 数据概览（无KeyError） ======================
+# ====================== 数据概览 ======================
 st.subheader("📋 数据概览")
 col1, col2, col3, col4 = st.columns(4)
 
@@ -231,7 +234,6 @@ for table_name, data in all_data.items():
     with st.expander(f"📊 {data['display_name']}详情", expanded=(table_name == "gold_price")):
         df = data["df"]
         
-        # 提示模拟数据
         if not data["is_real"]:
             st.info(f"ℹ️ 当前使用{data['display_name']}模拟数据（真实数据加载失败）")
         
@@ -301,7 +303,6 @@ with download_cols[0]:
         columns={"value": all_data[table_to_download]["display_name"]}
     )
     
-    # CSV下载
     csv_data = df_to_download.to_csv(index=False, encoding="utf-8-sig")
     st.download_button(
         label=f"下载{all_data[table_to_download]['display_name']}为CSV",
@@ -313,7 +314,6 @@ with download_cols[0]:
 
 with download_cols[1]:
     st.markdown("#### 全部数据下载")
-    # 合并所有表数据
     merged_df = None
     for table_name, data in all_data.items():
         temp_df = data["df"][["date", "value"]].rename(columns={"value": data["display_name"]})
@@ -323,7 +323,6 @@ with download_cols[1]:
             merged_df = pd.merge(merged_df, temp_df, on="date", how="outer")
     
     if merged_df is not None:
-        # Excel下载
         import io
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
