@@ -1,11 +1,8 @@
-# 核心依赖（指定兼容Python 3.10+的版本）
+# 仅保留pip可识别的依赖包，删除python_version相关行
 streamlit>=1.30.0,<2.0.0
 pandas>=2.0.0,<3.0.0
-supabase>=2.0.0,<3.0.0  # 修正包名：supabase-py → supabase
+supabase>=2.0.0,<3.0.0
 pyecharts>=2.0.0,<2.1.0
 streamlit-echarts>=0.4.0,<0.5.0
 openpyxl>=3.1.0,<3.2.0
 python-dotenv>=1.0.0,<2.0.0
-
-# 指定Python版本（强制Streamlit使用3.10，避免3.14）
-python_version = "3.10"
