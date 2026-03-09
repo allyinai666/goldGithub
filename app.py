@@ -84,7 +84,8 @@ def load_supabase_table(table_name):
         
         # 3. 解析响应数据（关键：确保data不为空）
         df = pd.DataFrame(response.data)
-        st.sidebar.debug(f"📝 {table_name} 原始数据条数：{len(df)}")  # 调试：显示实际读取的条数
+        # 修复：用write替代无效的debug命令，显示原始数据条数
+        st.sidebar.write(f"📝 {table_name} 原始数据条数：{len(df)}")
         
         # 4. 检查数据是否为空
         if df.empty:
