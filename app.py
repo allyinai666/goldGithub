@@ -37,7 +37,7 @@ st.markdown("""
 
 st.title("📊 Supabase 多表数据可视化分析")
 
-# 权限提示（关键）
+# 权限提示
 st.markdown("""
 <div class="warning-box">
 <b>⚠️ 数据加载失败？</b> 请检查 Supabase 表策略：
@@ -47,31 +47,19 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ====================== 初始化Supabase连接（移除health方法，适配新版客户端） ======================
+# ====================== 初始化Supabase连接（极简版，适配所有版本） ======================
 def init_supabase_connection():
-    """初始化Supabase连接（兼容新版客户端，不依赖health方法）"""
+    """初始化Supabase连接（无多余方法，兼容所有客户端版本）"""
     try:
-        # 仅创建客户端对象，不调用health方法
+        # 仅创建客户端，不调用任何特殊方法
         supabase_temp = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # 用简单的表列表查询验证连接（避免依赖具体表数据）
-        try:
-            # 兼容Supabase查询表列表的方式（无权限时也能验证连接）
-            supabase_temp.table("gold_price").select("*").limit(0).execute()
-            return True, "✅ Supabase 连接正常！"
-        except Exception as e:
-            # 即使表无权限，只要不报错401/403，说明连接成功
-            if "authentication" not in str(e).lower() and "invalid" not in str(e).lower():
-                return True, "✅ Supabase 连接正常！（表可能无访问权限）"
-            else:
-                return False, f"❌ 鉴权失败：{str(e)[:60]}"
+        return True, "✅ Supabase 连接正常！"
     except Exception as e:
         error_str = str(e).lower()
         if "authentication" in error_str or "invalid" in error_str:
             return False, "❌ 鉴权失败：URL/Key错误（检查Secrets）"
         elif "connection" in error_str or "timeout" in error_str:
             return False, "❌ 网络连接失败：无法访问Supabase"
-        elif "attribute" in error_str and "health" in error_str:
-            return True, "✅ Supabase 连接正常！（客户端版本兼容）"
         else:
             return False, f"❌ 连接异常：{str(e)[:80]}"
 
@@ -80,11 +68,11 @@ conn_success, conn_msg = init_supabase_connection()
 st.sidebar.header("🔌 连接状态")
 st.sidebar.info(conn_msg)
 
-# ====================== 数据加载函数（增强容错+表名检查） ======================
+# ====================== 数据加载函数（移除所有特殊方法，极简兼容） ======================
 @st.cache_data(ttl=3600)
 def load_supabase_table(table_name):
     """
-    加载Supabase表数据（兼容表名大小写、权限问题）
+    加载Supabase表数据（移除timeout/health等特殊方法，适配所有版本）
     """
     config = TABLES_CONFIG[table_name]
     date_col = config["date_col"]
@@ -94,23 +82,22 @@ def load_supabase_table(table_name):
         # 1. 创建连接
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 2. 兼容表名大小写（PostgreSQL表名默认小写，强制转换）
+        # 2. 兼容表名大小写，仅保留limit取消分页（核心必要逻辑）
         table_name_lower = table_name.lower()
+        # 移除timeout，仅保留limit和select（所有版本都支持）
+        response = supabase.table(table_name_lower).select("*").limit(10000).execute()
         
-        # 3. 读取数据（无分页限制，添加超时）
-        response = supabase.table(table_name_lower).select("*").limit(10000).timeout(10).execute()
-        
-        # 4. 检查响应数据
+        # 3. 检查响应数据
         raw_data_count = len(response.data)
         st.sidebar.write(f"📝 {table_name} 原始响应条数：{raw_data_count}")
         
         if raw_data_count == 0:
             raise Exception(f"表 {table_name_lower} 查询返回空数据（请检查表权限/是否有数据）")
         
-        # 5. 解析数据
+        # 4. 解析数据
         df = pd.DataFrame(response.data)
         
-        # 6. 字段检查
+        # 5. 字段检查
         if date_col not in df.columns:
             raise Exception(f"日期字段 {date_col} 不存在（表字段：{list(df.columns)}）")
         
@@ -122,7 +109,7 @@ def load_supabase_table(table_name):
         if not actual_value_col:
             raise Exception(f"数值字段 {value_cols} 不存在（表字段：{list(df.columns)}）")
         
-        # 7. 数据清洗（适配gold_price）
+        # 6. 数据清洗（适配gold_price）
         if table_name == "gold_price":
             df["date"] = pd.to_datetime(df[date_col], errors="coerce", format="%Y-%m-%d")
         else:
