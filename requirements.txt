@@ -1,5 +1,7 @@
 streamlit>=1.30.0
 pandas>=2.0.0
-plotly>=5.0.0
-yfinance>=0.2.0
-numpy>=1.24.0
+supabase-py>=2.0.0
+pyecharts>=2.0.0
+streamlit-echarts>=0.4.0
+openpyxl>=3.1.0  # 支持Excel读取
+python-dotenv>=1.0.0
