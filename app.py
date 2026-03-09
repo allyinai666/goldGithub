@@ -1,84 +1,103 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from sqlalchemy import create_engine
-import os
+import yfinance as yf
+from datetime import datetime, timedelta
 
 # 页面基础设置
 st.set_page_config(page_title="黄金投资分析系统", layout="wide")
 st.title("📈 黄金投资实时分析系统（免费云版）")
 
-# 读取Supabase数据库配置（从Streamlit Secrets获取）
+# 封装数据获取函数（直接从Yahoo Finance拉取，无数据库）
+@st.cache_data(ttl=3600)  # 1小时缓存，避免频繁请求
+def get_gold_data():
+    # 1. 黄金现货价格（XAU/USD）
+    gold = yf.Ticker("XAU=X")
+    gold_hist = gold.history(period="30d")  # 近30天数据
+    gold_hist.reset_index(inplace=True)
+    gold_hist["Date"] = pd.to_datetime(gold_hist["Date"]).dt.date
+
+    # 2. 美元指数（DXY）
+    dxy = yf.Ticker("DX-Y.NYB")
+    dxy_hist = dxy.history(period="30d")
+    dxy_hist.reset_index(inplace=True)
+    dxy_hist["Date"] = pd.to_datetime(dxy_hist["Date"]).dt.date
+
+    # 3. 黄金ETF（GLD）持仓相关
+    gld = yf.Ticker("GLD")
+    gld_hist = gld.history(period="30d")
+    gld_hist.reset_index(inplace=True)
+    gld_hist["Date"] = pd.to_datetime(gld_hist["Date"]).dt.date
+
+    # 4. 10年期TIPS（实际利率）
+    tips = yf.Ticker("LTPZ")  # TIPS ETF替代直接收益率
+    tips_hist = tips.history(period="30d")
+    tips_hist.reset_index(inplace=True)
+    tips_hist["Date"] = pd.to_datetime(tips_hist["Date"]).dt.date
+
+    return {
+        "gold": gold_hist,
+        "dxy": dxy_hist,
+        "gld": gld_hist,
+        "tips": tips_hist
+    }
+
+# 获取数据（增加异常处理）
 try:
-    DB_HOST = st.secrets["DB_HOST"]
-    DB_PORT = st.secrets["DB_PORT"]
-    DB_USER = st.secrets["DB_USER"]
-    DB_PASS = st.secrets["DB_PASSWORD"]
-    DB_NAME = st.secrets["DB_NAME"]
-    
-    # 连接数据库
-    engine = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+    data = get_gold_data()
+    gold_df = data["gold"]
+    dxy_df = data["dxy"]
+    gld_df = data["gld"]
+    tips_df = data["tips"]
+    st.success("✅ 数据获取成功！")
 except Exception as e:
-    st.error(f"数据库配置读取失败：{str(e)}")
-    engine = None
+    st.error(f"❌ 数据获取失败：{str(e)}")
+    st.stop()
 
-# 封装数据读取函数（增加异常处理）
-@st.cache_data(ttl=3600)  # 1小时缓存
-def get_data(table_name):
-    if engine is None:
-        return pd.DataFrame()
-    try:
-        df = pd.read_sql(f"SELECT * FROM {table_name} ORDER BY date DESC", engine)
-        df["date"] = pd.to_datetime(df["date"])  # 统一日期格式
-        return df
-    except Exception as e:
-        st.warning(f"读取{table_name}数据失败：{str(e)}")
-        return pd.DataFrame()
-
-# 读取各表数据
-dxy_df = get_data("dxy_data")
-gld_df = get_data("gld_holdings")
-tips_df = get_data("tips_yield")
-
-# 核心指标展示（增加空数据判断）
-st.subheader("🔍 核心驱动指标")
-col1, col2, col3 = st.columns(3)
+# 核心指标展示（最新值）
+st.subheader("🔍 核心驱动指标（实时）")
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    if not dxy_df.empty and "dxy_value" in dxy_df.columns:
-        latest_dxy = dxy_df.iloc[0]["dxy_value"]
-        st.metric("美元指数（DXY）", f"{latest_dxy:.2f}")
-    else:
-        st.metric("美元指数（DXY）", "暂无数据")
+    latest_gold = gold_df.iloc[-1]["Close"]
+    st.metric("黄金现货价格（USD/盎司）", f"{latest_gold:.2f}")
 
 with col2:
-    if not gld_df.empty and "gld_holdings_oz" in gld_df.columns:
-        latest_gld = gld_df.iloc[0]["gld_holdings_oz"]
-        st.metric("GLD持仓（盎司）", latest_gld)
-    else:
-        st.metric("GLD持仓（盎司）", "暂无数据")
+    latest_dxy = dxy_df.iloc[-1]["Close"]
+    st.metric("美元指数（DXY）", f"{latest_dxy:.2f}")
 
 with col3:
-    if not tips_df.empty and "y10_tips_yield" in tips_df.columns:
-        latest_tips = tips_df.iloc[0]["y10_tips_yield"]
-        st.metric("10年TIPS收益率（%）", f"{latest_tips:.2f}")
-    else:
-        st.metric("10年TIPS收益率（%）", "暂无数据")
+    latest_gld = gld_df.iloc[-1]["Close"]
+    st.metric("GLD ETF价格（USD）", f"{latest_gld:.2f}")
 
-# 趋势图展示（仅当有数据时绘制）
-st.subheader("📊 指标趋势")
-tab1, tab2 = st.tabs(["美元指数趋势", "实际利率趋势"])
+with col4:
+    latest_tips = tips_df.iloc[-1]["Close"]
+    st.metric("TIPS ETF价格（替代实际利率）", f"{latest_tips:.2f}")
+
+# 趋势图展示
+st.subheader("📊 近30天趋势")
+tab1, tab2, tab3 = st.tabs(["黄金价格趋势", "美元指数趋势", "GLD ETF趋势"])
 
 with tab1:
-    if not dxy_df.empty and "dxy_value" in dxy_df.columns:
-        fig_dxy = px.line(dxy_df, x="date", y="dxy_value", title="美元指数变化")
-        st.plotly_chart(fig_dxy, use_container_width=True)
-    else:
-        st.info("暂无美元指数数据，请等待GitHub Actions自动更新")
+    fig_gold = px.line(gold_df, x="Date", y="Close", title="黄金现货价格（XAU/USD）")
+    fig_gold.update_layout(xaxis_title="日期", yaxis_title="价格（USD/盎司）")
+    st.plotly_chart(fig_gold, use_container_width=True)
 
 with tab2:
-    if not tips_df.empty and "y10_tips_yield" in tips_df.columns:
-        fig_tips = px.line(tips_df, x="date", y="y10_tips_yield", title="10年TIPS收益率变化")
-        st.plotly_chart(fig_tips, use_container_width=True)
-    else:
-        st.info("暂无实际利率数据，请等待GitHub Actions自动更新")
+    fig_dxy = px.line(dxy_df, x="Date", y="Close", title="美元指数（DXY）")
+    fig_dxy.update_layout(xaxis_title="日期", yaxis_title="指数值")
+    st.plotly_chart(fig_dxy, use_container_width=True)
+
+with tab3:
+    fig_gld = px.line(gld_df, x="Date", y="Close", title="黄金ETF（GLD）价格")
+    fig_gld.update_layout(xaxis_title="日期", yaxis_title="价格（USD）")
+    st.plotly_chart(fig_gld, use_container_width=True)
+
+# 数据说明
+st.info("""
+📝 数据说明：
+1. 数据来源：Yahoo Finance（免费公开API）；
+2. 缓存机制：数据每小时更新一次，避免频繁请求；
+3. 替代说明：TIPS收益率用LTPZ ETF价格替代（免费API无直接收益率数据）；
+4. 更新频率：页面刷新即可获取最新数据。
+""")
