@@ -36,27 +36,29 @@ st.markdown("""
 
 st.title("📊 Supabase 多表数据可视化分析")
 
-# ====================== 初始化Supabase连接（自动读取配置） ======================
-@st.cache_data(ttl=3600)
+# ====================== 初始化Supabase连接（移除缓存，避免返回客户端对象） ======================
 def init_supabase_connection():
-    """初始化Supabase连接（从配置文件读取URL和Key）"""
+    """
+    初始化Supabase连接（移除@st.cache_data装饰，避免序列化错误）
+    返回：连接状态、提示信息（不返回客户端对象）
+    """
     try:
-        # 从配置文件读取连接信息
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # 仅验证连接，不返回客户端对象
+        supabase_temp = create_client(SUPABASE_URL, SUPABASE_KEY)
         # 验证连接（兼容测试表不存在的情况）
-        supabase.table("temp_test_table_12345").select("*").limit(1).execute()
-        return supabase, True, "✅ Supabase连接成功！（测试表不存在）"
+        supabase_temp.table("temp_test_table_12345").select("*").limit(1).execute()
+        return True, "✅ Supabase连接成功！（测试表不存在）"
     except Exception as e:
         error_str = str(e).lower()
         if "authentication" in error_str or "invalid" in error_str:
-            return None, False, "❌ 鉴权失败：URL或Key错误，请检查config.py配置"
+            return False, "❌ 鉴权失败：URL或Key错误，请检查Secrets配置"
         elif "pgrst205" in error_str:
-            return create_client(SUPABASE_URL, SUPABASE_KEY), True, "✅ Supabase连接成功！"
+            return True, "✅ Supabase连接成功！"
         else:
-            return None, False, f"❌ 连接失败：{str(e)[:100]}"
+            return False, f"❌ 连接失败：{str(e)[:100]}"
 
-# 自动初始化连接
-supabase, conn_success, conn_msg = init_supabase_connection()
+# 自动初始化连接（仅获取状态和提示，不获取客户端对象）
+conn_success, conn_msg = init_supabase_connection()
 st.sidebar.header("🔌 连接状态")
 st.sidebar.info(conn_msg)
 
@@ -64,7 +66,7 @@ st.sidebar.info(conn_msg)
 @st.cache_data(ttl=3600)
 def load_supabase_table(table_name):
     """
-    加载Supabase表数据（从配置读取字段映射，适配建表SQL的字段类型）
+    加载Supabase表数据（内部创建客户端对象，仅缓存数据，不缓存客户端）
     """
     # 从配置读取当前表的字段信息
     config = TABLES_CONFIG[table_name]
@@ -72,7 +74,7 @@ def load_supabase_table(table_name):
     value_cols = config["value_cols"]
     
     try:
-        # 1. 创建连接（从配置读取URL和Key）
+        # 1. 内部创建连接（每次缓存命中时重新创建，避免序列化问题）
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
         # 2. 查询表结构和数据
@@ -129,7 +131,7 @@ def load_supabase_table(table_name):
 
 # ====================== 加载所有表数据 ======================
 all_data = {}
-if conn_success and supabase:
+if conn_success:
     for table_name in TABLES_CONFIG.keys():
         df, is_real, msg = load_supabase_table(table_name)
         st.sidebar.text(f"{TABLES_CONFIG[table_name]['display_name']}：{msg}")
