@@ -27,27 +27,30 @@ st.markdown("""
 
 st.title("📊 Supabase 多表数据可视化分析")
 
-# ---------------------- 1. Supabase 连接配置（修复版） ----------------------
+# ---------------------- 1. Supabase 连接配置 ----------------------
 with st.sidebar:
     st.header("🔌 Supabase 配置")
     supabase_url = st.text_input("Supabase URL", placeholder="https://xxxx.supabase.co")
     supabase_key = st.text_input("Supabase Key", type="password", placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
     
-    # 测试连接按钮（修复版）
+    # 测试连接按钮
     if st.button("测试连接", type="primary"):
         if not supabase_url or not supabase_key:
             st.warning("请填写完整的URL和Key！")
         else:
             try:
-                # 步骤1：创建客户端对象
+                # 创建客户端对象
                 supabase = create_client(supabase_url, supabase_key)
                 
-                # 步骤2：尝试查询表元数据（通用验证）
+                # 尝试查询表元数据
                 try:
-                    # 查询数据库中的表列表（所有Supabase实例都支持）
                     tables_response = supabase.from_("tables").select("table_name").limit(5).execute()
                     st.success("✅ Supabase连接成功！")
-                    st.session_state["supabase_conn"] = supabase
+                    # 存储URL和Key而非客户端对象（关键修复）
+                    st.session_state["supabase_config"] = {
+                        "url": supabase_url,
+                        "key": supabase_key
+                    }
                     
                     # 显示检测到的表
                     table_names = [t['table_name'] for t in tables_response.data]
@@ -59,15 +62,15 @@ with st.sidebar:
                 except Exception as meta_e:
                     # 元数据查询失败，尝试基础鉴权验证
                     try:
-                        # 尝试查询任意表（仅验证鉴权，不关心表是否存在）
                         supabase.table("temp_table_12345").select("*").limit(1).execute()
                     except Exception as auth_e:
                         error_str = str(auth_e).lower()
-                        # 区分错误类型
                         if "pgrst205" in error_str:
-                            # PGRST205 = 表不存在，但鉴权成功
                             st.success("✅ Supabase连接成功！（测试表不存在）")
-                            st.session_state["supabase_conn"] = supabase
+                            st.session_state["supabase_config"] = {
+                                "url": supabase_url,
+                                "key": supabase_key
+                            }
                         elif "authentication" in error_str or "invalid" in error_str:
                             st.error("❌ 鉴权失败：URL或Key错误，请检查")
                         else:
@@ -76,11 +79,17 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ 连接失败：{str(e)[:150]}")
 
-# ---------------------- 2. 数据加载函数 ----------------------
+# ---------------------- 2. 数据加载函数（修复缓存问题） ----------------------
 @st.cache_data(ttl=3600)
-def load_supabase_table(supabase, table_name):
-    """加载Supabase指定表的数据"""
+def load_supabase_table(supabase_url, supabase_key, table_name):
+    """
+    加载Supabase指定表的数据
+    注意：参数使用URL和Key（可哈希），而非客户端对象（不可哈希）
+    """
     try:
+        # 在缓存函数内部创建客户端对象（关键修复）
+        supabase = create_client(supabase_url, supabase_key)
+        
         # 查询表中所有数据并按日期排序
         response = supabase.table(table_name).select("*").order("date", desc=False).execute()
         df = pd.DataFrame(response.data)
@@ -129,8 +138,8 @@ def load_supabase_table(supabase, table_name):
         return data, False
 
 # ---------------------- 3. 数据加载与展示 ----------------------
-if "supabase_conn" in st.session_state:
-    supabase = st.session_state["supabase_conn"]
+if "supabase_config" in st.session_state:
+    supabase_config = st.session_state["supabase_config"]
     
     # 定义要展示的表信息
     tables_config = {
@@ -140,10 +149,14 @@ if "supabase_conn" in st.session_state:
         "tips_yield": {"name": "TIPS收益率", "color": "#4ECDC4", "unit": "%"},
     }
     
-    # 加载所有表数据
+    # 加载所有表数据（传入URL和Key而非客户端对象）
     all_data = {}
     for table_name in tables_config.keys():
-        df, is_real = load_supabase_table(supabase, table_name)
+        df, is_real = load_supabase_table(
+            supabase_config["url"],
+            supabase_config["key"],
+            table_name
+        )
         all_data[table_name] = {"df": df, "is_real": is_real, "config": tables_config[table_name]}
     
     # ---------------------- 4. 数据概览 ----------------------
