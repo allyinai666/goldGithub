@@ -1,12 +1,5 @@
-# 核心：固定Streamlit和Altair版本，解决兼容性
-streamlit==1.36.0
-altair==4.2.2
-pandas==2.1.4
-plotly==5.17.0
-sqlalchemy==2.0.23
-psycopg2-binary==2.9.9
-yfinance==0.2.31
-python-dotenv==1.0.0
-# 补充依赖，避免遗漏
-numpy==1.26.2
-requests==2.31.0
+streamlit>=1.30.0
+pandas>=2.0.0
+plotly>=5.0.0
+yfinance>=0.2.0
+numpy>=1.24.0
