@@ -39,34 +39,35 @@ st.title("📊 Supabase 多表数据可视化分析")
 # ====================== 初始化Supabase连接（移除缓存，避免返回客户端对象） ======================
 def init_supabase_connection():
     """
-    初始化Supabase连接（移除@st.cache_data装饰，避免序列化错误）
-    返回：连接状态、提示信息（不返回客户端对象）
+    初始化Supabase连接（仅验证，不返回客户端对象）
     """
     try:
-        # 仅验证连接，不返回客户端对象
+        # 仅验证连接（用任意表测试，避免系统表）
         supabase_temp = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # 验证连接（兼容测试表不存在的情况）
-        supabase_temp.table("temp_test_table_12345").select("*").limit(1).execute()
-        return True, "✅ Supabase连接成功！（测试表不存在）"
+        # 尝试查询第一个表的1条数据（避免测试表不存在的问题）
+        first_table = list(TABLES_CONFIG.keys())[0]
+        supabase_temp.table(first_table).select("*").limit(1).execute()
+        return True, "✅ Supabase连接成功！"
     except Exception as e:
         error_str = str(e).lower()
         if "authentication" in error_str or "invalid" in error_str:
             return False, "❌ 鉴权失败：URL或Key错误，请检查Secrets配置"
-        elif "pgrst205" in error_str:
-            return True, "✅ Supabase连接成功！"
+        elif "pgrst205" in error_str or "relation" in error_str:
+            # 表不存在但连接正常
+            return True, "✅ Supabase连接成功！（表可能未创建/权限不足）"
         else:
             return False, f"❌ 连接失败：{str(e)[:100]}"
 
-# 自动初始化连接（仅获取状态和提示，不获取客户端对象）
+# 自动初始化连接
 conn_success, conn_msg = init_supabase_connection()
 st.sidebar.header("🔌 连接状态")
 st.sidebar.info(conn_msg)
 
-# ====================== 数据加载函数（适配建表SQL的字段类型） ======================
+# ====================== 数据加载函数（移除系统表查询，直接处理数据） ======================
 @st.cache_data(ttl=3600)
 def load_supabase_table(table_name):
     """
-    加载Supabase表数据（内部创建客户端对象，仅缓存数据，不缓存客户端）
+    加载Supabase表数据（移除columns系统表查询，直接基于配置的字段处理）
     """
     # 从配置读取当前表的字段信息
     config = TABLES_CONFIG[table_name]
@@ -74,46 +75,46 @@ def load_supabase_table(table_name):
     value_cols = config["value_cols"]
     
     try:
-        # 1. 内部创建连接（每次缓存命中时重新创建，避免序列化问题）
+        # 1. 内部创建连接
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 2. 查询表结构和数据
-        # 查询所有字段
-        columns_response = supabase.from_("columns").select("column_name").eq("table_name", table_name).execute()
-        table_columns = [col["column_name"] for col in columns_response.data]
-        st.sidebar.info(f"📋 表 {table_name} 字段：{table_columns}")
+        # 2. 直接查询表数据（不查系统表）
+        response = supabase.table(table_name).select("*").execute()
+        df = pd.DataFrame(response.data)
         
-        # 3. 字段兼容性处理
-        # 日期字段处理（兼容text/date/timestamp类型）
-        actual_date_col = date_col if date_col in table_columns else None
-        if not actual_date_col:
-            raise Exception(f"未找到日期字段：{date_col}")
+        # 3. 检查数据是否为空
+        if df.empty:
+            raise Exception("表中无数据")
         
-        # 数值字段处理
+        # 4. 字段兼容性处理（基于配置，不依赖系统表）
+        # 检查日期字段是否存在
+        if date_col not in df.columns:
+            raise Exception(f"日期字段 {date_col} 不存在，表字段：{list(df.columns)}")
+        
+        # 检查数值字段是否存在
         actual_value_col = None
         for col in value_cols:
-            if col in table_columns:
+            if col in df.columns:
                 actual_value_col = col
                 break
         if not actual_value_col:
-            raise Exception(f"未找到数值字段：{value_cols}")
-        
-        # 4. 查询数据并处理类型
-        response = supabase.table(table_name).select("*").order(actual_date_col, desc=False).execute()
-        df = pd.DataFrame(response.data)
+            raise Exception(f"数值字段 {value_cols} 不存在，表字段：{list(df.columns)}")
         
         # 5. 数据清洗（适配建表SQL的字段类型）
         # 日期字段转换（兼容text/date/timestamp）
-        if df[actual_date_col].dtype == "object":  # gold_date是text类型
-            df["date"] = pd.to_datetime(df[actual_date_col], errors="coerce")
-        else:  # date是date/timestamp类型
-            df["date"] = pd.to_datetime(df[actual_date_col])
+        if df[date_col].dtype == "object":  # text类型日期
+            df["date"] = pd.to_datetime(df[date_col], errors="coerce")
+        else:  # date/timestamp类型
+            df["date"] = pd.to_datetime(df[date_col])
         
         # 数值字段转换（兼容text/double precision）
         df["value"] = pd.to_numeric(df[actual_value_col], errors="coerce").fillna(0)
         
         # 过滤无效数据
         df = df.dropna(subset=["date"]).reset_index(drop=True)
+        
+        # 输出表字段信息到侧边栏（基于实际数据）
+        st.sidebar.info(f"📋 表 {table_name} 字段：{list(df.columns)}")
         
         return df, True, f"✅ 加载成功（{len(df)} 条数据）"
     
