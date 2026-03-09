@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from supabase import create_client
 from pyecharts import options as opts
-from pyecharts.charts import Line, Grid
+from pyecharts.charts import Line
 from streamlit_echarts import st_pyecharts
 from datetime import datetime, timedelta
 import warnings
@@ -27,23 +27,52 @@ st.markdown("""
 
 st.title("📊 Supabase 多表数据可视化分析")
 
-# ---------------------- 1. Supabase 连接配置 ----------------------
+# ---------------------- 1. Supabase 连接配置（修复版） ----------------------
 with st.sidebar:
     st.header("🔌 Supabase 配置")
     supabase_url = st.text_input("Supabase URL", placeholder="https://xxxx.supabase.co")
     supabase_key = st.text_input("Supabase Key", type="password", placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
     
-    # 测试连接按钮
+    # 测试连接按钮（修复版）
     if st.button("测试连接", type="primary"):
         if not supabase_url or not supabase_key:
             st.warning("请填写完整的URL和Key！")
         else:
             try:
+                # 步骤1：创建客户端对象
                 supabase = create_client(supabase_url, supabase_key)
-                # 测试连接
-                supabase.rpc("version").execute()
-                st.success("✅ 连接成功！")
-                st.session_state["supabase_conn"] = supabase
+                
+                # 步骤2：尝试查询表元数据（通用验证）
+                try:
+                    # 查询数据库中的表列表（所有Supabase实例都支持）
+                    tables_response = supabase.from_("tables").select("table_name").limit(5).execute()
+                    st.success("✅ Supabase连接成功！")
+                    st.session_state["supabase_conn"] = supabase
+                    
+                    # 显示检测到的表
+                    table_names = [t['table_name'] for t in tables_response.data]
+                    if table_names:
+                        st.info(f"ℹ️ 检测到表：{', '.join(table_names)}")
+                    else:
+                        st.info("ℹ️ 连接成功，但未检测到数据表")
+                        
+                except Exception as meta_e:
+                    # 元数据查询失败，尝试基础鉴权验证
+                    try:
+                        # 尝试查询任意表（仅验证鉴权，不关心表是否存在）
+                        supabase.table("temp_table_12345").select("*").limit(1).execute()
+                    except Exception as auth_e:
+                        error_str = str(auth_e).lower()
+                        # 区分错误类型
+                        if "pgrst205" in error_str:
+                            # PGRST205 = 表不存在，但鉴权成功
+                            st.success("✅ Supabase连接成功！（测试表不存在）")
+                            st.session_state["supabase_conn"] = supabase
+                        elif "authentication" in error_str or "invalid" in error_str:
+                            st.error("❌ 鉴权失败：URL或Key错误，请检查")
+                        else:
+                            st.error(f"❌ 连接异常：{str(auth_e)[:100]}")
+                
             except Exception as e:
                 st.error(f"❌ 连接失败：{str(e)[:150]}")
 
@@ -52,7 +81,7 @@ with st.sidebar:
 def load_supabase_table(supabase, table_name):
     """加载Supabase指定表的数据"""
     try:
-        # 查询表中所有数据
+        # 查询表中所有数据并按日期排序
         response = supabase.table(table_name).select("*").order("date", desc=False).execute()
         df = pd.DataFrame(response.data)
         
@@ -64,7 +93,14 @@ def load_supabase_table(supabase, table_name):
         
         return df, True
     except Exception as e:
-        st.warning(f"⚠️ 加载表 {table_name} 失败：{str(e)[:100]}")
+        error_msg = str(e).lower()
+        if "pgrst205" in error_msg:
+            st.warning(f"⚠️ 表 `{table_name}` 不存在，请检查表名是否正确")
+        elif "authentication" in error_msg:
+            st.warning(f"⚠️ 访问表 `{table_name}` 权限不足")
+        else:
+            st.warning(f"⚠️ 加载表 `{table_name}` 失败：{str(e)[:80]}")
+        
         # 生成模拟数据
         dates = pd.date_range(start="2024-01-01", periods=30)
         if table_name == "gold_price":
@@ -182,7 +218,7 @@ if "supabase_conn" in st.session_state:
         
         # 提示是否使用模拟数据
         if not gold_data["is_real"]:
-            st.info("ℹ️ 当前使用模拟数据，连接Supabase后可查看真实数据")
+            st.info("ℹ️ 当前使用模拟数据，请确认Supabase中存在 `gold_price` 表")
         
         # 数据表格
         col1, col2 = st.columns([2, 1])
@@ -239,7 +275,7 @@ if "supabase_conn" in st.session_state:
             df = table_data["df"]
             
             if not table_data["is_real"]:
-                st.info("ℹ️ 当前使用模拟数据，连接Supabase后可查看真实数据")
+                st.info(f"ℹ️ 当前使用模拟数据，请确认Supabase中存在 `{table_name}` 表")
             
             # 数据表格
             st.dataframe(df, use_container_width=True, height=200)
@@ -323,8 +359,8 @@ else:
     # 未连接Supabase时的提示
     st.info("""
     📝 请先在左侧边栏配置Supabase连接信息：
-    1. 输入Supabase URL
-    2. 输入Supabase Key
+    1. 输入Supabase URL（格式：https://xxxx.supabase.co）
+    2. 输入Supabase Key（anon/public key）
     3. 点击"测试连接"按钮
     4. 连接成功后即可查看和分析4张表的数据
     """)
