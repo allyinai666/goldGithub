@@ -9,11 +9,20 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-# 页面基础设置
+# ====================== 导入独立配置文件 ======================
+from config import (
+    SUPABASE_URL,
+    SUPABASE_KEY,
+    TABLES_CONFIG,
+    PAGE_CONFIG,
+    SIMULATE_DATA_BASE
+)
+
+# ====================== 页面基础设置（从配置读取） ======================
 st.set_page_config(
-    page_title="Supabase 多表数据可视化",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title=PAGE_CONFIG["page_title"],
+    layout=PAGE_CONFIG["layout"],
+    initial_sidebar_state=PAGE_CONFIG["initial_sidebar_state"]
 )
 
 # 自定义样式
@@ -27,244 +36,237 @@ st.markdown("""
 
 st.title("📊 Supabase 多表数据可视化分析")
 
-# ---------------------- 1. Supabase 连接配置 ----------------------
-with st.sidebar:
-    st.header("🔌 Supabase 配置")
-    supabase_url = st.text_input("Supabase URL", placeholder="https://xxxx.supabase.co")
-    supabase_key = st.text_input("Supabase Key", type="password", placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
-    
-    # 测试连接按钮
-    if st.button("测试连接", type="primary"):
-        if not supabase_url or not supabase_key:
-            st.warning("请填写完整的URL和Key！")
-        else:
-            try:
-                # 创建客户端对象
-                supabase = create_client(supabase_url, supabase_key)
-                
-                # 尝试查询表元数据
-                try:
-                    tables_response = supabase.from_("tables").select("table_name").limit(5).execute()
-                    st.success("✅ Supabase连接成功！")
-                    # 存储URL和Key而非客户端对象（关键修复）
-                    st.session_state["supabase_config"] = {
-                        "url": supabase_url,
-                        "key": supabase_key
-                    }
-                    
-                    # 显示检测到的表
-                    table_names = [t['table_name'] for t in tables_response.data]
-                    if table_names:
-                        st.info(f"ℹ️ 检测到表：{', '.join(table_names)}")
-                    else:
-                        st.info("ℹ️ 连接成功，但未检测到数据表")
-                        
-                except Exception as meta_e:
-                    # 元数据查询失败，尝试基础鉴权验证
-                    try:
-                        supabase.table("temp_table_12345").select("*").limit(1).execute()
-                    except Exception as auth_e:
-                        error_str = str(auth_e).lower()
-                        if "pgrst205" in error_str:
-                            st.success("✅ Supabase连接成功！（测试表不存在）")
-                            st.session_state["supabase_config"] = {
-                                "url": supabase_url,
-                                "key": supabase_key
-                            }
-                        elif "authentication" in error_str or "invalid" in error_str:
-                            st.error("❌ 鉴权失败：URL或Key错误，请检查")
-                        else:
-                            st.error(f"❌ 连接异常：{str(auth_e)[:100]}")
-                
-            except Exception as e:
-                st.error(f"❌ 连接失败：{str(e)[:150]}")
-
-# ---------------------- 2. 数据加载函数（修复缓存问题） ----------------------
+# ====================== 初始化Supabase连接（自动读取配置） ======================
 @st.cache_data(ttl=3600)
-def load_supabase_table(supabase_url, supabase_key, table_name):
-    """
-    加载Supabase指定表的数据
-    注意：参数使用URL和Key（可哈希），而非客户端对象（不可哈希）
-    """
+def init_supabase_connection():
+    """初始化Supabase连接（从配置文件读取URL和Key）"""
     try:
-        # 在缓存函数内部创建客户端对象（关键修复）
-        supabase = create_client(supabase_url, supabase_key)
+        # 从配置文件读取连接信息
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # 验证连接（兼容测试表不存在的情况）
+        supabase.table("temp_test_table_12345").select("*").limit(1).execute()
+        return supabase, True, "✅ Supabase连接成功！（测试表不存在）"
+    except Exception as e:
+        error_str = str(e).lower()
+        if "authentication" in error_str or "invalid" in error_str:
+            return None, False, "❌ 鉴权失败：URL或Key错误，请检查config.py配置"
+        elif "pgrst205" in error_str:
+            return create_client(SUPABASE_URL, SUPABASE_KEY), True, "✅ Supabase连接成功！"
+        else:
+            return None, False, f"❌ 连接失败：{str(e)[:100]}"
+
+# 自动初始化连接
+supabase, conn_success, conn_msg = init_supabase_connection()
+st.sidebar.header("🔌 连接状态")
+st.sidebar.info(conn_msg)
+
+# ====================== 数据加载函数（适配建表SQL的字段类型） ======================
+@st.cache_data(ttl=3600)
+def load_supabase_table(table_name):
+    """
+    加载Supabase表数据（从配置读取字段映射，适配建表SQL的字段类型）
+    """
+    # 从配置读取当前表的字段信息
+    config = TABLES_CONFIG[table_name]
+    date_col = config["date_col"]
+    value_cols = config["value_cols"]
+    
+    try:
+        # 1. 创建连接（从配置读取URL和Key）
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 查询表中所有数据并按日期排序
-        response = supabase.table(table_name).select("*").order("date", desc=False).execute()
+        # 2. 查询表结构和数据
+        # 查询所有字段
+        columns_response = supabase.from_("columns").select("column_name").eq("table_name", table_name).execute()
+        table_columns = [col["column_name"] for col in columns_response.data]
+        st.sidebar.info(f"📋 表 {table_name} 字段：{table_columns}")
+        
+        # 3. 字段兼容性处理
+        # 日期字段处理（兼容text/date/timestamp类型）
+        actual_date_col = date_col if date_col in table_columns else None
+        if not actual_date_col:
+            raise Exception(f"未找到日期字段：{date_col}")
+        
+        # 数值字段处理
+        actual_value_col = None
+        for col in value_cols:
+            if col in table_columns:
+                actual_value_col = col
+                break
+        if not actual_value_col:
+            raise Exception(f"未找到数值字段：{value_cols}")
+        
+        # 4. 查询数据并处理类型
+        response = supabase.table(table_name).select("*").order(actual_date_col, desc=False).execute()
         df = pd.DataFrame(response.data)
         
-        # 数据预处理
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-        df = df.fillna(0)  # 填充空值
-        df = df.reset_index(drop=True)
+        # 5. 数据清洗（适配建表SQL的字段类型）
+        # 日期字段转换（兼容text/date/timestamp）
+        if df[actual_date_col].dtype == "object":  # gold_date是text类型
+            df["date"] = pd.to_datetime(df[actual_date_col], errors="coerce")
+        else:  # date是date/timestamp类型
+            df["date"] = pd.to_datetime(df[actual_date_col])
         
-        return df, True
+        # 数值字段转换（兼容text/double precision）
+        df["value"] = pd.to_numeric(df[actual_value_col], errors="coerce").fillna(0)
+        
+        # 过滤无效数据
+        df = df.dropna(subset=["date"]).reset_index(drop=True)
+        
+        return df, True, f"✅ 加载成功（{len(df)} 条数据）"
+    
     except Exception as e:
-        error_msg = str(e).lower()
-        if "pgrst205" in error_msg:
-            st.warning(f"⚠️ 表 `{table_name}` 不存在，请检查表名是否正确")
-        elif "authentication" in error_msg:
-            st.warning(f"⚠️ 访问表 `{table_name}` 权限不足")
-        else:
-            st.warning(f"⚠️ 加载表 `{table_name}` 失败：{str(e)[:80]}")
-        
-        # 生成模拟数据
+        st.warning(f"⚠️ 加载表 {table_name} 失败：{str(e)[:100]}")
+        # 生成模拟数据（从配置读取基础值）
         dates = pd.date_range(start="2024-01-01", periods=30)
-        if table_name == "gold_price":
-            data = pd.DataFrame({
-                "date": dates,
-                "price": 2100 + np.cumsum(np.random.normal(0, 3, 30)),
-                "open": 2100 + np.cumsum(np.random.normal(0, 2.5, 30)),
-                "high": 2100 + np.cumsum(np.random.normal(0, 3.5, 30)),
-                "low": 2100 + np.cumsum(np.random.normal(0, 2, 30))
-            })
-        elif table_name == "dxy_data":
-            data = pd.DataFrame({
-                "date": dates,
-                "value": 102 + np.cumsum(np.random.normal(0, 0.1, 30))
-            })
-        elif table_name == "gld_holdings":
-            data = pd.DataFrame({
-                "date": dates,
-                "holdings": 900 + np.cumsum(np.random.normal(0, 1, 30))
-            })
-        elif table_name == "tips_yield":
-            data = pd.DataFrame({
-                "date": dates,
-                "yield": 1.5 + np.cumsum(np.random.normal(0, 0.05, 30))
-            })
-        return data, False
+        base_value = SIMULATE_DATA_BASE.get(table_name, 100)
+        
+        df = pd.DataFrame({
+            "date": dates,
+            "value": base_value + np.cumsum(np.random.normal(0, 1, 30))
+        })
+        return df, False, f"⚠️ 使用{config['display_name']}模拟数据"
 
-# ---------------------- 3. 数据加载与展示 ----------------------
-if "supabase_config" in st.session_state:
-    supabase_config = st.session_state["supabase_config"]
-    
-    # 定义要展示的表信息
-    tables_config = {
-        "gold_price": {"name": "黄金价格", "color": "#FFD700", "unit": "USD/盎司"},
-        "dxy_data": {"name": "美元指数", "color": "#0052CC", "unit": ""},
-        "gld_holdings": {"name": "GLD持仓量", "color": "#FF6B6B", "unit": "吨"},
-        "tips_yield": {"name": "TIPS收益率", "color": "#4ECDC4", "unit": "%"},
-    }
-    
-    # 加载所有表数据（传入URL和Key而非客户端对象）
-    all_data = {}
-    for table_name in tables_config.keys():
-        df, is_real = load_supabase_table(
-            supabase_config["url"],
-            supabase_config["key"],
-            table_name
-        )
-        all_data[table_name] = {"df": df, "is_real": is_real, "config": tables_config[table_name]}
-    
-    # ---------------------- 4. 数据概览 ----------------------
-    st.subheader("📋 数据概览")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # 黄金价格概览
-    with col1:
-        gold_df = all_data["gold_price"]["df"]
-        latest_gold = gold_df["price"].iloc[-1] if "price" in gold_df.columns else 0
-        change_gold = latest_gold - gold_df["price"].iloc[0] if len(gold_df) > 0 else 0
-        st.markdown(f"""
-        <div class="metric-card">
-            <h4>🎯 黄金价格</h4>
-            <p style="font-size:20px; color:#FFD700; font-weight:bold;">{latest_gold:.2f}</p>
-            <p style="color:{'green' if change_gold>0 else 'red'}">
-                {"↑" if change_gold>0 else "↓"} {abs(change_gold):.2f}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # 美元指数概览
-    with col2:
-        dxy_df = all_data["dxy_data"]["df"]
-        latest_dxy = dxy_df["value"].iloc[-1] if "value" in dxy_df.columns else 0
-        change_dxy = latest_dxy - dxy_df["value"].iloc[0] if len(dxy_df) > 0 else 0
-        st.markdown(f"""
-        <div class="metric-card">
-            <h4>💵 美元指数</h4>
-            <p style="font-size:20px; color:#0052CC; font-weight:bold;">{latest_dxy:.2f}</p>
-            <p style="color:{'green' if change_dxy>0 else 'red'}">
-                {"↑" if change_dxy>0 else "↓"} {abs(change_dxy):.2f}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # GLD持仓概览
-    with col3:
-        gld_df = all_data["gld_holdings"]["df"]
-        latest_gld = gld_df["holdings"].iloc[-1] if "holdings" in gld_df.columns else 0
-        change_gld = latest_gld - gld_df["holdings"].iloc[0] if len(gld_df) > 0 else 0
-        st.markdown(f"""
-        <div class="metric-card">
-            <h4>📦 GLD持仓</h4>
-            <p style="font-size:20px; color:#FF6B6B; font-weight:bold;">{latest_gld:.1f}</p>
-            <p style="color:{'green' if change_gld>0 else 'red'}">
-                {"↑" if change_gld>0 else "↓"} {abs(change_gld):.1f}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # TIPS收益率概览
-    with col4:
-        tips_df = all_data["tips_yield"]["df"]
-        latest_tips = tips_df["yield"].iloc[-1] if "yield" in tips_df.columns else 0
-        change_tips = latest_tips - tips_df["yield"].iloc[0] if len(tips_df) > 0 else 0
-        st.markdown(f"""
-        <div class="metric-card">
-            <h4>📈 TIPS收益率</h4>
-            <p style="font-size:20px; color:#4ECDC4; font-weight:bold;">{latest_tips:.2f}</p>
-            <p style="color:{'green' if change_tips>0 else 'red'}">
-                {"↑" if change_tips>0 else "↓"} {abs(change_tips):.2f}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # ---------------------- 5. 详细数据与可视化 ----------------------
-    # 5.1 黄金价格详情
-    with st.expander("📊 黄金价格详情", expanded=True):
-        gold_data = all_data["gold_price"]
-        gold_df = gold_data["df"]
+# ====================== 加载所有表数据 ======================
+all_data = {}
+if conn_success and supabase:
+    for table_name in TABLES_CONFIG.keys():
+        df, is_real, msg = load_supabase_table(table_name)
+        st.sidebar.text(f"{TABLES_CONFIG[table_name]['display_name']}：{msg}")
+        all_data[table_name] = {
+            "df": df,
+            "is_real": is_real,
+            "display_name": TABLES_CONFIG[table_name]["display_name"],
+            "color": TABLES_CONFIG[table_name]["color"],
+            "unit": TABLES_CONFIG[table_name]["unit"]
+        }
+else:
+    # 连接失败时生成所有模拟数据
+    st.warning("⚠️ Supabase连接失败，全部使用模拟数据")
+    for table_name in TABLES_CONFIG.keys():
+        dates = pd.date_range(start="2024-01-01", periods=30)
+        base_value = SIMULATE_DATA_BASE.get(table_name, 100)
         
-        # 提示是否使用模拟数据
-        if not gold_data["is_real"]:
-            st.info("ℹ️ 当前使用模拟数据，请确认Supabase中存在 `gold_price` 表")
+        df = pd.DataFrame({
+            "date": dates,
+            "value": base_value + np.cumsum(np.random.normal(0, 1, 30))
+        })
+        all_data[table_name] = {
+            "df": df,
+            "is_real": False,
+            "display_name": TABLES_CONFIG[table_name]["display_name"],
+            "color": TABLES_CONFIG[table_name]["color"],
+            "unit": TABLES_CONFIG[table_name]["unit"]
+        }
+
+# ====================== 数据概览（无KeyError） ======================
+st.subheader("📋 数据概览")
+col1, col2, col3, col4 = st.columns(4)
+
+# GLD持仓量
+with col1:
+    gld_df = all_data["gld_holdings"]["df"]
+    latest_gld = gld_df["value"].iloc[-1] if len(gld_df) > 0 else 0
+    change_gld = latest_gld - gld_df["value"].iloc[0] if len(gld_df) > 0 else 0
+    st.markdown(f"""
+    <div class="metric-card">
+        <h4>📦 {all_data['gld_holdings']['display_name']}</h4>
+        <p style="font-size:18px; color:{all_data['gld_holdings']['color']}; font-weight:bold;">{latest_gld:,.0f}</p>
+        <p style="color:{'green' if change_gld>0 else 'red'}">
+            {"↑" if change_gld>0 else "↓"} {abs(change_gld):,.0f} {all_data['gld_holdings']['unit']}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# TIPS收益率
+with col2:
+    tips_df = all_data["tips_yield"]["df"]
+    latest_tips = tips_df["value"].iloc[-1] if len(tips_df) > 0 else 0
+    change_tips = latest_tips - tips_df["value"].iloc[0] if len(tips_df) > 0 else 0
+    st.markdown(f"""
+    <div class="metric-card">
+        <h4>📈 {all_data['tips_yield']['display_name']}</h4>
+        <p style="font-size:18px; color:{all_data['tips_yield']['color']}; font-weight:bold;">{latest_tips:.2f}</p>
+        <p style="color:{'green' if change_tips>0 else 'red'}">
+            {"↑" if change_tips>0 else "↓"} {abs(change_tips):.2f} {all_data['tips_yield']['unit']}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# 美元指数
+with col3:
+    dxy_df = all_data["dxy_data"]["df"]
+    latest_dxy = dxy_df["value"].iloc[-1] if len(dxy_df) > 0 else 0
+    change_dxy = latest_dxy - dxy_df["value"].iloc[0] if len(dxy_df) > 0 else 0
+    st.markdown(f"""
+    <div class="metric-card">
+        <h4>💵 {all_data['dxy_data']['display_name']}</h4>
+        <p style="font-size:18px; color:{all_data['dxy_data']['color']}; font-weight:bold;">{latest_dxy:.2f}</p>
+        <p style="color:{'green' if change_dxy>0 else 'red'}">
+            {"↑" if change_dxy>0 else "↓"} {abs(change_dxy):.2f}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# 黄金价格
+with col4:
+    gold_df = all_data["gold_price"]["df"]
+    latest_gold = gold_df["value"].iloc[-1] if len(gold_df) > 0 else 0
+    change_gold = latest_gold - gold_df["value"].iloc[0] if len(gold_df) > 0 else 0
+    st.markdown(f"""
+    <div class="metric-card">
+        <h4>🎯 {all_data['gold_price']['display_name']}</h4>
+        <p style="font-size:18px; color:{all_data['gold_price']['color']}; font-weight:bold;">{latest_gold:.2f}</p>
+        <p style="color:{'green' if change_gold>0 else 'red'}">
+            {"↑" if change_gold>0 else "↓"} {abs(change_gold):.2f} {all_data['gold_price']['unit']}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ====================== 详细数据与可视化 ======================
+for table_name, data in all_data.items():
+    with st.expander(f"📊 {data['display_name']}详情", expanded=(table_name == "gold_price")):
+        df = data["df"]
         
-        # 数据表格
+        # 提示模拟数据
+        if not data["is_real"]:
+            st.info(f"ℹ️ 当前使用{data['display_name']}模拟数据（真实数据加载失败）")
+        
+        # 数据表格 + 统计
         col1, col2 = st.columns([2, 1])
         with col1:
-            st.dataframe(gold_df, use_container_width=True, height=200)
-        
-        # 数据统计
+            st.dataframe(df[["date", "value"]].rename(columns={"value": data["display_name"]}), 
+                         use_container_width=True, height=200)
         with col2:
             st.subheader("统计信息")
-            if "price" in gold_df.columns:
+            if len(df) > 0:
                 stats = {
-                    "平均值": gold_df["price"].mean(),
-                    "最大值": gold_df["price"].max(),
-                    "最小值": gold_df["price"].min(),
-                    "最新值": gold_df["price"].iloc[-1],
-                    "数据条数": len(gold_df)
+                    "平均值": df["value"].mean(),
+                    "最大值": df["value"].max(),
+                    "最小值": df["value"].min(),
+                    "最新值": df["value"].iloc[-1],
+                    "数据条数": len(df)
                 }
                 for key, value in stats.items():
-                    st.write(f"**{key}**: {value:.2f}" if key != "数据条数" else f"**{key}**: {value}")
+                    if key == "数据条数":
+                        st.write(f"**{key}**: {value}")
+                    elif table_name == "gld_holdings":
+                        st.write(f"**{key}**: {value:,.0f}")
+                    else:
+                        st.write(f"**{key}**: {value:.2f}")
         
-        # 黄金价格图表
-        if "date" in gold_df.columns and "price" in gold_df.columns:
-            x_data = [d.strftime("%Y-%m-%d") for d in gold_df["date"]]
-            y_price = gold_df["price"].round(2).tolist()
+        # 趋势图表
+        if len(df) > 0 and "date" in df.columns and "value" in df.columns:
+            x_data = [d.strftime("%Y-%m-%d") for d in df["date"]]
+            y_data = df["value"].round(2).tolist()
             
-            # 构建图表
             line = (
                 Line(init_opts=opts.InitOpts(width="100%", height="400px"))
                 .add_xaxis(x_data)
                 .add_yaxis(
-                    f"黄金价格 ({gold_data['config']['unit']})",
-                    y_price,
-                    itemstyle_opts=opts.ItemStyleOpts(color=gold_data["config"]["color"]),
+                    f"{data['display_name']} ({data['unit']})",
+                    y_data,
+                    itemstyle_opts=opts.ItemStyleOpts(color=data["color"]),
                     markpoint_opts=opts.MarkPointOpts(
                         data=[opts.MarkPointItem(type_="max"), opts.MarkPointItem(type_="min")]
                     ),
@@ -273,125 +275,65 @@ if "supabase_config" in st.session_state:
                     )
                 )
                 .set_global_opts(
-                    title_opts=opts.TitleOpts(title="黄金价格走势", subtitle="按日期排序"),
+                    title_opts=opts.TitleOpts(title=f"{data['display_name']}30天走势"),
                     xaxis_opts=opts.AxisOpts(axislabel_opts=opts.LabelOpts(rotate=-45)),
                     tooltip_opts=opts.TooltipOpts(trigger="axis", formatter="{b}<br/>{a}: {c}"),
                     legend_opts=opts.LegendOpts(pos_top="5%")
                 )
             )
             st_pyecharts(line, width="100%")
+
+# ====================== 数据下载 ======================
+st.subheader("💾 数据下载")
+download_cols = st.columns(2)
+
+with download_cols[0]:
+    st.markdown("#### 单表下载")
+    table_to_download = st.selectbox(
+        "选择要下载的表", 
+        list(all_data.keys()), 
+        format_func=lambda x: all_data[x]["display_name"]
+    )
+    df_to_download = all_data[table_to_download]["df"][["date", "value"]].rename(
+        columns={"value": all_data[table_to_download]["display_name"]}
+    )
     
-    # 5.2 其他表详情（折叠展示）
-    for table_name in ["dxy_data", "gld_holdings", "tips_yield"]:
-        with st.expander(f"📊 {tables_config[table_name]['name']}详情", expanded=False):
-            table_data = all_data[table_name]
-            df = table_data["df"]
-            
-            if not table_data["is_real"]:
-                st.info(f"ℹ️ 当前使用模拟数据，请确认Supabase中存在 `{table_name}` 表")
-            
-            # 数据表格
-            st.dataframe(df, use_container_width=True, height=200)
-            
-            # 可视化
-            value_col = "value" if table_name == "dxy_data" else "holdings" if table_name == "gld_holdings" else "yield"
-            if "date" in df.columns and value_col in df.columns:
-                x_data = [d.strftime("%Y-%m-%d") for d in df["date"]]
-                y_data = df[value_col].round(2).tolist()
-                
-                line = (
-                    Line(init_opts=opts.InitOpts(width="100%", height="300px"))
-                    .add_xaxis(x_data)
-                    .add_yaxis(
-                        f"{tables_config[table_name]['name']} ({tables_config[table_name]['unit']})",
-                        y_data,
-                        itemstyle_opts=opts.ItemStyleOpts(color=table_data["config"]["color"])
-                    )
-                    .set_global_opts(
-                        title_opts=opts.TitleOpts(title=f"{tables_config[table_name]['name']}走势"),
-                        xaxis_opts=opts.AxisOpts(axislabel_opts=opts.LabelOpts(rotate=-45)),
-                        tooltip_opts=opts.TooltipOpts(trigger="axis")
-                    )
-                )
-                st_pyecharts(line, width="100%")
+    # CSV下载
+    csv_data = df_to_download.to_csv(index=False, encoding="utf-8-sig")
+    st.download_button(
+        label=f"下载{all_data[table_to_download]['display_name']}为CSV",
+        data=csv_data,
+        file_name=f"{table_to_download}_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+with download_cols[1]:
+    st.markdown("#### 全部数据下载")
+    # 合并所有表数据
+    merged_df = None
+    for table_name, data in all_data.items():
+        temp_df = data["df"][["date", "value"]].rename(columns={"value": data["display_name"]})
+        if merged_df is None:
+            merged_df = temp_df
+        else:
+            merged_df = pd.merge(merged_df, temp_df, on="date", how="outer")
     
-    # ---------------------- 6. 数据下载 ----------------------
-    st.subheader("💾 数据下载")
-    download_cols = st.columns(2)
-    
-    with download_cols[0]:
-        st.markdown("#### 单表下载")
-        table_to_download = st.selectbox("选择要下载的表", list(tables_config.keys()), format_func=lambda x: tables_config[x]["name"])
-        df_to_download = all_data[table_to_download]["df"]
+    if merged_df is not None:
+        # Excel下载
+        import io
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            for table_name, data in all_data.items():
+                data["df"][["date", "value"]].rename(
+                    columns={"value": data["display_name"]}
+                ).to_excel(writer, sheet_name=data["display_name"], index=False)
         
-        # CSV下载
-        csv_data = df_to_download.to_csv(index=False, encoding="utf-8-sig")
+        buffer.seek(0)
         st.download_button(
-            label=f"下载{tables_config[table_to_download]['name']}为CSV",
-            data=csv_data,
-            file_name=f"{table_to_download}_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
+            label="下载所有数据为Excel（多sheet）",
+            data=buffer,
+            file_name=f"supabase_all_data_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-    
-    with download_cols[1]:
-        st.markdown("#### 全部数据下载")
-        # 合并所有表数据
-        merged_df = None
-        for table_name, data in all_data.items():
-            if merged_df is None:
-                merged_df = data["df"].add_prefix(f"{table_name}_")
-            else:
-                temp_df = data["df"].add_prefix(f"{table_name}_")
-                merged_df = pd.merge(
-                    merged_df, 
-                    temp_df, 
-                    left_on=f"{merged_df.columns[0]}", 
-                    right_on=f"{temp_df.columns[0]}", 
-                    how="outer"
-                )
-        
-        if merged_df is not None:
-            # Excel下载
-            import io
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                for table_name, data in all_data.items():
-                    data["df"].to_excel(writer, sheet_name=tables_config[table_name]["name"], index=False)
-            
-            buffer.seek(0)
-            st.download_button(
-                label="下载所有数据为Excel（多sheet）",
-                data=buffer,
-                file_name=f"supabase_all_data_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-
-else:
-    # 未连接Supabase时的提示
-    st.info("""
-    📝 请先在左侧边栏配置Supabase连接信息：
-    1. 输入Supabase URL（格式：https://xxxx.supabase.co）
-    2. 输入Supabase Key（anon/public key）
-    3. 点击"测试连接"按钮
-    4. 连接成功后即可查看和分析4张表的数据
-    """)
-    
-    # 显示模拟数据预览
-    if st.button("查看模拟数据预览"):
-        # 生成模拟数据预览
-        st.subheader("模拟数据预览")
-        
-        # 黄金价格模拟数据
-        dates = pd.date_range(start="2024-01-01", periods=10)
-        gold_df = pd.DataFrame({
-            "date": dates,
-            "price": 2100 + np.cumsum(np.random.normal(0, 3, 10)),
-            "open": 2100 + np.cumsum(np.random.normal(0, 2.5, 10)),
-            "high": 2100 + np.cumsum(np.random.normal(0, 3.5, 10)),
-            "low": 2100 + np.cumsum(np.random.normal(0, 2, 10))
-        })
-        
-        st.dataframe(gold_df, use_container_width=True)
-        st.info("这是模拟数据，连接Supabase后将显示真实数据")
