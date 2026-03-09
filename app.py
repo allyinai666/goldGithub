@@ -18,7 +18,7 @@ from config import (
     SIMULATE_DATA_BASE
 )
 
-# ====================== 页面基础设置（从配置读取） ======================
+# ====================== 页面基础设置 ======================
 st.set_page_config(
     page_title=PAGE_CONFIG["page_title"],
     layout=PAGE_CONFIG["layout"],
@@ -31,41 +31,52 @@ st.markdown("""
     .dataframe {font-size: 12px !important;}
     .stExpander {border: 1px solid #e6e6e6; border-radius: 8px; margin-bottom: 10px;}
     .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 8px; margin: 5px 0;}
+    .warning-box {background-color: #fff3cd; padding: 10px; border-radius: 5px; margin: 10px 0;}
     </style>
     """, unsafe_allow_html=True)
 
 st.title("📊 Supabase 多表数据可视化分析")
 
+# 权限提示（关键）
+st.markdown("""
+<div class="warning-box">
+<b>⚠️ 数据加载失败？</b> 请检查 Supabase 表策略：
+1. 进入 Supabase 后台 → Authentication → Policies；
+2. 为 gld_holdings/tips_yield/dxy_data/gold_price 表添加「Allow anon access」策略；
+3. 重启应用后重试。
+</div>
+""", unsafe_allow_html=True)
+
 # ====================== 初始化Supabase连接 ======================
 def init_supabase_connection():
-    """初始化Supabase连接（仅验证，不返回客户端对象）"""
+    """初始化Supabase连接（详细错误排查）"""
     try:
         supabase_temp = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # 验证gold_price表连接（指定limit避免分页问题）
-        response = supabase_temp.table("gold_price").select("*").limit(1).execute()
-        if len(response.data) > 0:
-            return True, "✅ Supabase连接成功！"
+        # 测试连接（不依赖具体表）
+        health = supabase_temp.health()
+        if health.status_code == 200:
+            return True, "✅ Supabase 服务正常！"
         else:
-            return True, "✅ Supabase连接成功！（gold_price表查询到空数据）"
+            return False, f"❌ Supabase 服务异常：{health.status_code}"
     except Exception as e:
         error_str = str(e).lower()
         if "authentication" in error_str or "invalid" in error_str:
-            return False, "❌ 鉴权失败：URL或Key错误，请检查Secrets配置"
-        elif "pgrst205" in error_str or "relation" in error_str:
-            return True, "✅ Supabase连接成功！（表可能未创建/权限不足）"
+            return False, "❌ 鉴权失败：URL/Key错误（检查Secrets）"
+        elif "connection" in error_str or "timeout" in error_str:
+            return False, "❌ 网络连接失败：无法访问Supabase"
         else:
-            return False, f"❌ 连接失败：{str(e)[:100]}"
+            return False, f"❌ 连接异常：{str(e)[:80]}"
 
 # 自动初始化连接
 conn_success, conn_msg = init_supabase_connection()
 st.sidebar.header("🔌 连接状态")
 st.sidebar.info(conn_msg)
 
-# ====================== 数据加载函数（修复gold_price表分页/读取问题） ======================
+# ====================== 数据加载函数（增强容错+表名检查） ======================
 @st.cache_data(ttl=3600)
 def load_supabase_table(table_name):
     """
-    加载Supabase表数据（适配gold_price表：取消分页限制，兼容text主键）
+    加载Supabase表数据（兼容表名大小写、权限问题）
     """
     config = TABLES_CONFIG[table_name]
     date_col = config["date_col"]
@@ -75,25 +86,35 @@ def load_supabase_table(table_name):
         # 1. 创建连接
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 2. 核心修复：取消分页限制，读取所有数据（适配2000+条数据）
-        # gold_price表特殊处理：指定limit=10000（覆盖2000条），兼容text主键
-        if table_name == "gold_price":
-            response = supabase.table(table_name).select("*").limit(10000).execute()
-        else:
-            response = supabase.table(table_name).select("*").limit(10000).execute()
+        # 2. 兼容表名大小写（PostgreSQL表名默认小写，强制转换）
+        table_name_lower = table_name.lower()
         
-        # 3. 解析响应数据（关键：确保data不为空）
+        # 3. 读取数据（无分页限制，添加超时）
+        response = supabase.table(table_name_lower).select("*").limit(10000).timeout(10).execute()
+        
+        # 4. 检查响应数据
+        raw_data_count = len(response.data)
+        st.sidebar.write(f"📝 {table_name} 原始响应条数：{raw_data_count}")
+        
+        if raw_data_count == 0:
+            # 尝试查询表是否存在（排查表名错误）
+            try:
+                # 查询表列表（兼容Supabase架构）
+                schema_response = supabase.rpc("pg_catalog.pg_tables", {"schemaname": "public"}).execute()
+                table_list = [t["tablename"] for t in schema_response.data]
+                if table_name_lower not in table_list:
+                    raise Exception(f"表 {table_name_lower} 不存在于public架构（现有表：{table_list[:5]}...）")
+                else:
+                    raise Exception(f"表 {table_name_lower} 存在但无数据（权限/空表）")
+            except:
+                raise Exception(f"表查询返回空数据（响应条数：{raw_data_count}）")
+        
+        # 5. 解析数据
         df = pd.DataFrame(response.data)
-        # 修复：用write替代无效的debug命令，显示原始数据条数
-        st.sidebar.write(f"📝 {table_name} 原始数据条数：{len(df)}")
         
-        # 4. 检查数据是否为空
-        if df.empty:
-            raise Exception(f"表查询返回空数据（响应数据条数：{len(response.data)}）")
-        
-        # 5. 字段检查
+        # 6. 字段检查
         if date_col not in df.columns:
-            raise Exception(f"日期字段 {date_col} 不存在，表字段：{list(df.columns)}")
+            raise Exception(f"日期字段 {date_col} 不存在（表字段：{list(df.columns)}）")
         
         actual_value_col = None
         for col in value_cols:
@@ -101,30 +122,22 @@ def load_supabase_table(table_name):
                 actual_value_col = col
                 break
         if not actual_value_col:
-            raise Exception(f"数值字段 {value_cols} 不存在，表字段：{list(df.columns)}")
+            raise Exception(f"数值字段 {value_cols} 不存在（表字段：{list(df.columns)}）")
         
-        # 6. 数据清洗（重点适配gold_price的text类型日期/数值）
-        # 日期字段转换（gold_date是text类型，需强制转换）
+        # 7. 数据清洗（适配gold_price）
         if table_name == "gold_price":
-            # 强制转换text类型的gold_date为日期（忽略格式错误）
             df["date"] = pd.to_datetime(df[date_col], errors="coerce", format="%Y-%m-%d")
         else:
-            if df[date_col].dtype == "object":
-                df["date"] = pd.to_datetime(df[date_col], errors="coerce")
-            else:
-                df["date"] = pd.to_datetime(df[date_col])
+            df["date"] = pd.to_datetime(df[date_col], errors="coerce")
         
-        # 数值字段转换（gold_price的nwgold_price是text类型）
         df["value"] = pd.to_numeric(df[actual_value_col], errors="coerce").fillna(0)
-        
-        # 过滤无效数据
         df = df.dropna(subset=["date"]).reset_index(drop=True)
-        st.sidebar.info(f"📋 {table_name} 有效数据条数：{len(df)}（原始：{len(response.data)}）")
         
+        st.sidebar.info(f"📋 {table_name} 有效数据条数：{len(df)}")
         return df, True, f"✅ 加载成功（有效数据：{len(df)} 条）"
     
     except Exception as e:
-        st.warning(f"⚠️ 加载表 {table_name} 失败：{str(e)[:150]}")
+        st.warning(f"⚠️ 加载表 {table_name} 失败：{str(e)[:180]}")
         # 生成模拟数据
         dates = pd.date_range(start="2024-01-01", periods=30)
         base_value = SIMULATE_DATA_BASE.get(table_name, 100)
